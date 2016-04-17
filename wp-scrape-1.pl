@@ -11,37 +11,48 @@ use autodie; # die if problem reading or writing a file
 # bring in first URL from url-list.txt making variable $plugin_URL
 
 # Is this right?
-my $dir                 = dir(".");                              # URL list resides in same dir
-my $url_list            = $dir->file("url-list.txt");            #this exists at start
-my $not_found_plugins   = $dir->file("not_found_plugins.log");   #this gets created on running
-my $plugins_flagged_old = $dir->file("plugins_flagged_old.log"); #this gets created on running
+# my $dir                 = dir(".");                              # URL list resides in same dir
+# my $url_list            = $dir->file("url-list.txt");            #this exists at start
+# my $not_found_plugins   = $dir->file("not_found_plugins.log");   #this gets created on running
+# my $plugins_flagged_old = $dir->file("plugins_flagged_old.log"); #this gets created on running
+#
+# # openr() returns an IO::File object to read from --- Making handles here cause I think I'm supposed to?
+# my $url_list_handle            = $url_list->openr();
+# my $not_found_plugins_handle   = $not_found_plugins->openr();
+# my $plugins_flagged_old_handle = $plugins_flagged_old->openr();
 
-# openr() returns an IO::File object to read from --- Making handles here cause I think I'm supposed to?
-my $url_list_handle            = $url_list->openr();
-my $not_found_plugins_handle   = $not_found_plugins->openr();
-my $plugins_flagged_old_handle = $plugins_flagged_old->openr();
+open(my $url_list_handle, "<", "./url-list.txt");
+open(my $not_found_plugins_handle, ">>", "./not_found_plugins.log" );
+open(my $plugins_flagged_old_handle, ">>", "./plugins_flagged_old.log" );
+open(my $results_handle, ">>", "./output.txt" );
+
 
 print
-"plugin_name , plugin_URL , downloads , avg_rating , rating_count  , five_stars , four_stars , three_stars , two_stars, one_star , last_update , max_reqs , min_reqs , tags , contributors ,  ";
+"plugin_name , plugin_URL , downloads , avg_rating , rating_count  , five_stars , four_stars , three_stars , two_stars, one_star , last_update , max_reqs , min_reqs , tags , contributors ,  \n";
 
 # Read in one URL at a time from url-list.txt
 while (my $plugin_URL = $url_list_handle->getline()) {
+	chomp $plugin_URL;
+	print "fetching $plugin_URL\n";
 	my($plugin_name, $downloads, $avg_rating, $old_flag, $plugin_tags, $min_reqs,
 	  $max_reqs, $last_update, $rating_count, $one_star,
 	  $two_stars, $three_stars, $four_stars, $five_stars);
     my ($page) = wq($plugin_URL);
 
     if ($page) { #___  looking to see if the URL resolves to an actual plugin page, or that alt-404-ish search result page.
-
-        $page->find('p.no-plugin-results'); # if this <p> element is found, the plugin page didn't resolve.
+		my $find_result = $page->find('p.no-plugin-results')->each(sub {
+			print "$plugin_URL resolved to that stupid NOT 404 page.\n"; #then print such and
+			last;
+		});
+		# print "$find_result\n";
+        # if($page->find('p.no-plugin-results')){
+		# } # if this <p> element is found, the plugin page didn't resolve.
                                             # don't need to capture the contents of p.no-plugin-results
                                             # just need like "if this is exists, record such and skip to the next one"
 
-        print "$plugin_URL resolved to that stupid NOT 404 page.\n"; #then print such and
 
         # $not_found_plugins_handle->print($plugin_URL"\n");   <- log entry if we don't get a plugin page (for later)
 
-        return;
     }
 
     #___So if the page loaded IS a plugin page -
@@ -50,26 +61,29 @@ while (my $plugin_URL = $url_list_handle->getline()) {
     #Harvesting:
 
     # Is it flagged as an old plugin? ------------------
-    $page->find('div.plugin-notice-open-old')->each(
+    $page->find('div.plugin-notice-open-old span.plugin-notice-banner-msg')->each(
         sub {
-            $old_flag = $_->find('span.plugin-notice-banner-msg')->text;
+            $old_flag = $_->text;
             print "$plugin_URL was flagged as old."; # lil feedback here
         }
     ); # saving contents of the span in case age changes in these notices plugin-to-plugin - will know how old.
 
     #Getting the Title ------------------------
-    $page->find('div#plugin-title')->each(
+    $page->find('div#plugin-title h2')->each(
         sub {
-            $plugin_name = $_->find('h2')->text;
+            $plugin_name = $_->text;
 
             #print "Getting Metadata for: $plugin_name... ";     #some feedback for later when outputing to file
         }
     );
 
     #Tags ------------------------
+	my(@tags)  = ();
     $page->find('div#plugin-tags')->each(
         sub {
-            $plugin_tags = $_->find('a')->text; #TO DO - several tags -  should be an array:
+            $_->find('a')->each(sub {
+				push @tags, $_->text; #TO DO - several tags -  should be an array:
+			});
         }
     );                                             # need to figure out how to
                                                    #get tags until there are no more
@@ -77,57 +91,46 @@ while (my $plugin_URL = $url_list_handle->getline()) {
     #Version Requirements (min/max)
     $page->find('div.col-3')->each(
         sub {
+			# my $child = $_->find('p')->first->contents()->first;
+			# print $child->next->text."\n";
+
             $min_reqs = $_->find('p')->first->text; #this might be dicy. muliple items in same container.
         }
     );
 
-    $page->find('div.col-3')->each(
-        sub {
-            $max_reqs = $_->find('p')->second->text; #same container, separated by a break & <strong>text</strong>. Does "second" work?
-        }
-    );
+    # $page->find('div.col-3')->each(
+    #     sub {
+    #     }
+    # );
 
     #Last Updated				dicyness here too- want to collect the attribute "content" on the meta tag with
     #									an attribute of itemprop="dateModified"
-    $page->find('div.col-3')->each(
-        sub {
-            $last_update = $_->find('p > meta itemprop="dateModified"')->attr('content');
-        }
-    );
+    $last_update = $page->find('meta[itemprop="dateModified"]')->first->attr('content');
 
     #User Downloads					Similarly dicey SYNTAX HERE. Want the attribute "content" on the meta tag with
     #									an attribute of itemprop="interactionCount"
     #									Bonus for stripping off "Userdownloads:" that's prepended to the value
-    $page->find('div.col-3')->each(
-        sub {
-            $downloads = $_->find('p > meta itemprop="interactionCount"')->attr('content');
-        }
-    );
+
+	$downloads = $page->find('meta[itemprop="interactionCount"]')->first->attr('content');
 
     #Ratings Summary
     #
 
-    $page->find('div.col-3')->each(
-        sub {
-            $avg_rating = $_->find('div.left > meta itemprop="ratingValue"')->attr('content');
-        }
-    );
+    $avg_rating = $page->find('meta[itemprop="ratingValue"]')->first->attr('content');
 
-    $page->find('div.col-3')->each(
-        sub {
-            $rating_count = $_->find('div.left > meta itemprop="ratingCount"')->attr('content');
-        }
-    );
+    $rating_count = $page->find('meta[itemprop="ratingCount"]')->first->attr('content');
 
     #Star Ratings
     #
-    $page->find('div.col-3')->each(
+	my(@star_ratings) = ();
+	$page->find('div.counter-container span.counter-count')->each(
         sub {
-            $five_stars  = $_->find('div.left > div:nth-child(6) > span')->text;
-            $four_stars  = $_->find('div.left > div:nth-child(7) > span')->text;
-            $three_stars = $_->find('div.left > div:nth-child(8) > span')->text;
-            $two_stars   = $_->find('div.left > div:nth-child(9) > span')->text;
-            $one_star    = $_->find('div.left > div:nth-child(10) > span')->text;
+			push @star_ratings, $_->text;
+            # $five_stars  = $_->find('div.left > div:nth-child(6) > span')->text;
+            # $four_stars  = $_->find('div.left > div:nth-child(7) > span')->text;
+            # $three_stars = $_->find('div.left > div:nth-child(8) > span')->text;
+            # $two_stars   = $_->find('div.left > div:nth-child(9) > span')->text;
+            # $one_star    = $_->find('div.left > div:nth-child(10) > span')->text;
         }
     );
 
@@ -143,12 +146,13 @@ while (my $plugin_URL = $url_list_handle->getline()) {
     # NOW Outputing...
 
     print "$plugin_name , $plugin_URL , $downloads , $avg_rating , $rating_count"
-        . ", $five_stars , $four_stars , $three_stars , $two_stars, $one_star"
-        . " , $last_update , $max_reqs , $min_reqs , ";
+        . ", ".join(", ", @star_ratings)
+        . " , $last_update , $min_reqs, ".join(" | ", @tags)."\n";
 
     # Logging older plugins seperately AND in main file
     # Printing it to a file later:
     # $plugins_flagged_old_handle->print($plugin_name" , "$plugin_URL" , "$old_flag);
+	last;
     sleep(2);
 
 }
